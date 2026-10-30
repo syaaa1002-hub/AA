@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>관리 화면 - 맞춤 상품 추천</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="is-staff">
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="./">맞춤 상품 추천 · 관리</a>
+      <div class="topbar-actions">
+        <a class="btn btn-ghost btn-sm" href="./">추천 화면</a>
+        <button id="logoutBtn" class="btn btn-sm" type="button" hidden>잠그기</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section id="lock" class="lock" hidden>
+      <h1>관리 화면</h1>
+      <p class="muted">상담원 PIN으로 잠금을 풀어 주세요.</p>
+      <button id="unlockBtn" class="btn btn-primary" type="button">PIN 입력</button>
+    </section>
+
+    <div id="app" hidden>
+      <nav class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="products" aria-selected="true">상품 관리</button>
+        <button class="tab" role="tab" data-tab="sales" aria-selected="false">판매 데이터</button>
+        <button class="tab" role="tab" data-tab="excel" aria-selected="false">엑셀 업로드</button>
+      </nav>
+
+      <!-- 상품 관리 -->
+      <section class="panel" data-panel="products">
+        <div class="panel-head">
+          <div>
+            <h2>상품 <span id="productCount" class="muted"></span></h2>
+            <span class="muted">재고는 칸에서 바로 고치면 저장됩니다.</span>
+          </div>
+          <div class="toolbar">
+            <input id="productSearch" class="input" type="search" placeholder="상품명·ID 검색">
+            <button id="addProductBtn" class="btn btn-primary" type="button">+ 상품 추가</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table class="data">
+            <thead>
+              <tr>
+                <th>ID</th><th></th><th>상품명</th><th>카테고리</th><th>대상</th>
+                <th class="num">판매가</th><th class="num">재고</th><th class="num">최근 4주 판매</th><th></th>
+              </tr>
+            </thead>
+            <tbody id="productRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 판매 데이터 -->
+      <section class="panel" data-panel="sales" hidden>
+        <div class="panel-head">
+          <div>
+            <h2>조건별 판매 수량</h2>
+            <span class="muted">상품과 주차를 고르고 칸을 고친 뒤 저장하세요. 0은 판매 없음입니다.</span>
+          </div>
+        </div>
+        <div class="toolbar" style="margin-bottom:12px">
+          <label class="field-inline">상품 <select id="salesProduct" class="select"></select></label>
+          <label class="field-inline">주차 <input id="salesWeek" class="input" list="weekList" placeholder="2026-W44" size="10"></label>
+          <datalist id="weekList"></datalist>
+          <button id="salesLoadBtn" class="btn" type="button">불러오기</button>
+        </div>
+        <div class="table-wrap">
+          <table class="data" id="salesTable">
+            <thead>
+              <tr><th>연령대</th><th class="num">남성 본인용</th><th class="num">남성 선물용</th><th class="num">여성 본인용</th><th class="num">여성 선물용</th><th class="num">합계</th></tr>
+            </thead>
+            <tbody id="salesRows"></tbody>
+          </table>
+        </div>
+        <div class="toolbar" style="justify-content:flex-end;margin-top:12px">
+          <span id="salesTotal" class="muted"></span>
+          <button id="salesSaveBtn" class="btn btn-primary" type="button">저장</button>
+        </div>
+      </section>
+
+      <!-- 엑셀 -->
+      <section class="panel" data-panel="excel" hidden>
+        <h2>엑셀로 한 번에 반영</h2>
+        <ol class="steps">
+          <li>양식을 내려받습니다. "상품" 시트에는 현재 상품이 채워져 있습니다.</li>
+          <li>재고·신규 상품은 "상품" 시트에, 지난주 조건별 판매 수량은 "주간판매" 시트에 입력합니다.</li>
+          <li>파일을 올리면 미리보기가 나오고, <b>반영하기</b>를 눌러야 실제로 바뀝니다.</li>
+        </ol>
+        <div class="toolbar">
+          <button id="templateBtn" class="btn" type="button">양식 내려받기 (.xlsx)</button>
+          <label class="btn btn-primary">
+            파일 선택해 미리보기
+            <input id="uploadInput" type="file" accept=".xlsx" hidden>
+          </label>
+          <span id="uploadName" class="muted"></span>
+        </div>
+        <div id="preview" hidden>
+          <div class="summary-cards" id="summaryCards"></div>
+          <div id="errorBox" hidden>
+            <h3 style="font-size:15px;margin:12px 0 6px">건너뛸 오류 행</h3>
+            <div class="table-wrap">
+              <table class="data">
+                <thead><tr><th>시트</th><th>행</th><th>내용</th></tr></thead>
+                <tbody id="errorRows"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="toolbar" style="justify-content:flex-end;margin-top:12px">
+            <button id="cancelUploadBtn" class="btn btn-ghost" type="button">취소</button>
+            <button id="applyUploadBtn" class="btn btn-primary" type="button">반영하기</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- 상품 편집 -->
+  <dialog id="productDialog" class="dialog wide">
+    <form id="productForm" method="dialog">
+      <h2 id="productDialogTitle">상품 추가</h2>
+      <div class="form-grid" style="margin-top:12px">
+        <label class="form-field"><span>상품ID</span>
+          <input class="input" name="id" placeholder="비우면 자동 생성 (예: P031)">
+        </label>
+        <label class="form-field"><span>카테고리</span>
+          <input class="input" name="category" list="categoryList" required>
+          <datalist id="categoryList"></datalist>
+        </label>
+        <label class="form-field full"><span>상품명</span>
+          <input class="input" name="name" required>
+        </label>
+        <label class="form-field"><span>정가(원)</span>
+          <input class="input" name="price" type="number" min="1" required>
+        </label>
+        <label class="form-field"><span>할인가(원)</span>
+          <input class="input" name="sale_price" type="number" min="1" placeholder="없으면 비움">
+        </label>
+        <div class="form-field"><span>추천 성별</span>
+          <div class="check-group" data-group="target_gender"></div>
+        </div>
+        <div class="form-field"><span>용도</span>
+          <div class="check-group" data-group="purposes"></div>
+        </div>
+        <div class="form-field full"><span>추천 연령대</span>
+          <div class="check-group" data-group="target_ages"></div>
+        </div>
+        <label class="form-field full"><span>추천 문구 ("이런 분께 좋아요")</span>
+          <input class="input" name="recommend_text">
+        </label>
+        <label class="form-field"><span>재고</span>
+          <input class="input" name="stock" type="number" min="0" value="0">
+        </label>
+        <label class="form-field"><span>쇼핑몰 링크</span>
+          <input class="input" name="link" placeholder="비우면 데모 쇼핑몰 링크">
+        </label>
+        <div class="form-field full"><span>이미지</span>
+          <div class="toolbar">
+            <img id="imgPreview" class="img-preview" alt="">
+            <select class="select" name="image"></select>
+          </div>
+          <small>public/images 폴더의 이미지 중에서 고릅니다.</small>
+        </div>
+        <label class="form-field full"><span>내부 메모 (상담원만 보임)</span>
+          <textarea class="textarea" name="memo" rows="2"></textarea>
+        </label>
+      </div>
+      <p class="form-error" id="productError" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" data-close>취소</button>
+        <button type="submit" class="btn btn-primary">저장</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="pinDialog" class="dialog">
+    <form method="dialog">
+      <h2>관리 화면</h2>
+      <p class="muted">PIN 4자리를 입력하세요.</p>
+      <input type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" autocomplete="off" class="pin-input" aria-label="PIN">
+      <p class="pin-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-ghost" data-cancel>취소</button>
+        <button type="submit" class="btn btn-primary">확인</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="js/common.js"></script>
+  <script src="js/admin.js"></script>
+</body>
+</html>
