@@ -69,6 +69,7 @@ async function load() {
     if (e.status === 401 && state.staff) {
       setStaff(false);
       toast('상담원 인증이 만료되어 고객 화면으로 돌아갑니다', 'warn');
+      load(); // 화면에 남은 재고·메모를 지우고 고객용 목록으로 다시 그린다
       return;
     }
     if (seq !== loadSeq) return;
