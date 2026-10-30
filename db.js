@@ -3,20 +3,26 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet:
 const postgres = require('postgres');
 
 const DATABASE_URL = process.env.DATABASE_URL;
-if (!DATABASE_URL) {
-  throw new Error('DATABASE_URL이 설정되지 않았습니다. .env(로컬) 또는 Vercel 환경 변수에 Supabase 연결 문자열을 넣어 주세요.');
+const NO_DB_MESSAGE = '데이터베이스가 연결되지 않았습니다. 관리자가 DATABASE_URL 환경 변수(Supabase 연결 문자열)를 설정해야 합니다.';
+
+// DATABASE_URL이 없어도 서버(화면)는 뜨고, DB를 쓰는 요청만 503으로 안내한다
+function missingDb() {
+  const err = new Error(NO_DB_MESSAGE);
+  err.status = 503;
+  throw err;
 }
-const isLocalDb = /@(localhost|127\.0\.0\.1)[:/]/.test(DATABASE_URL);
 
 // Supabase 트랜잭션 풀러(6543)는 prepared statement를 지원하지 않으므로 prepare: false
-const sql = postgres(DATABASE_URL, {
-  prepare: false,
-  ssl: isLocalDb ? false : 'require',
-  max: process.env.VERCEL ? 3 : 10,
-  idle_timeout: 20,
-  connect_timeout: 15,
-  onnotice: () => {},
-});
+const sql = DATABASE_URL
+  ? postgres(DATABASE_URL, {
+    prepare: false,
+    ssl: /@(localhost|127\.0\.0\.1)[:/]/.test(DATABASE_URL) ? false : 'require',
+    max: process.env.VERCEL ? 3 : 10,
+    idle_timeout: 20,
+    connect_timeout: 15,
+    onnotice: () => {},
+  })
+  : Object.assign(missingDb, { begin: missingDb, unsafe: missingDb, end: async () => {} });
 
 const CODES = {
   genders: ['남성', '여성'],

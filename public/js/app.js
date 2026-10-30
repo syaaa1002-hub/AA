@@ -71,7 +71,14 @@ async function load() {
       toast('상담원 인증이 만료되어 고객 화면으로 돌아갑니다', 'warn');
       return;
     }
-    toast(e.message || '목록을 불러오지 못했습니다', 'error');
+    if (seq !== loadSeq) return;
+    // 빈 화면 대신 무엇이 문제인지 목록 자리에 보여 준다
+    items = [];
+    grid.innerHTML = '';
+    $('#resultTitle').textContent = titleText();
+    $('#resultMeta').textContent = '';
+    $('#empty').textContent = `상품 목록을 불러오지 못했습니다. ${e.message || ''}`;
+    $('#empty').hidden = false;
   }
 }
 
@@ -135,6 +142,7 @@ function cardHtml(p) {
 
 function render() {
   grid.innerHTML = items.map(cardHtml).join('');
+  $('#empty').textContent = '조건에 맞는 상품이 없습니다. 조건을 바꿔 보세요.';
   $('#empty').hidden = items.length > 0;
 }
 

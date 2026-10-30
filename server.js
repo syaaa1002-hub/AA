@@ -14,24 +14,32 @@ const {
 const PORT = Number(process.env.PORT) || 3000;
 const IS_VERCEL = !!process.env.VERCEL;
 
+// 설정이 빠져도 서버(화면)는 뜨게 하고, 상담원 기능만 막은 채 무엇이 빠졌는지 알려 준다
 const STAFF_PIN = String(process.env.STAFF_PIN || '').trim();
-if (!/^\d{4,12}$/.test(STAFF_PIN)) {
-  throw new Error('STAFF_PIN을 숫자 4~12자리로 설정해 주세요. 인터넷에 공개할 때는 6자리 이상을 권장합니다.');
-}
+const configProblems = [];
+if (!/^\d{4,12}$/.test(STAFF_PIN)) configProblems.push('STAFF_PIN(숫자 4~12자리)');
 
 // 토큰 서명 키. PIN을 바꾸면 기존 토큰도 함께 무효가 된다.
 let AUTH_SECRET = process.env.AUTH_SECRET;
 if (!AUTH_SECRET) {
-  if (IS_VERCEL) throw new Error('Vercel 환경 변수에 AUTH_SECRET을 설정해 주세요.');
-  AUTH_SECRET = crypto.randomBytes(32).toString('hex');
-  console.warn('AUTH_SECRET이 없어 임시 값을 씁니다. 서버를 다시 시작하면 상담원 모드가 풀립니다.');
+  if (IS_VERCEL) {
+    configProblems.push('AUTH_SECRET');
+  } else {
+    AUTH_SECRET = crypto.randomBytes(32).toString('hex');
+    console.warn('AUTH_SECRET이 없어 임시 값을 씁니다. 서버를 다시 시작하면 상담원 모드가 풀립니다.');
+  }
 }
+if (configProblems.length) console.error(`환경 변수가 없거나 잘못되었습니다: ${configProblems.join(', ')}`);
 const SIGN_KEY = crypto.createHash('sha256').update(`${AUTH_SECRET}:${STAFF_PIN}`).digest();
 
 const app = express();
 if (IS_VERCEL) app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public'))); // Vercel에서는 무시되고 public/을 CDN이 제공
+
+// Vercel은 /를 이 함수로 보내므로 추천 화면을 직접 돌려준다 (주소가 /index.html로 바뀌지 않게)
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+app.get('/', (req, res) => res.type('html').send(INDEX_HTML));
 
 // ---------------------------------------------------------------- 추천 목록
 
@@ -130,6 +138,9 @@ function clientIp(req) {
 }
 
 app.post('/api/auth', async (req, res) => {
+  if (configProblems.length) {
+    return res.status(503).json({ error: `상담원 모드를 쓸 수 없습니다. 관리자가 환경 변수 ${configProblems.join(', ')}를 설정해야 합니다.` });
+  }
   const ip = clientIp(req);
   const [lock] = await sql`
     SELECT EXTRACT(EPOCH FROM (locked_until - now()))::int AS sec
@@ -157,6 +168,8 @@ app.post('/api/auth', async (req, res) => {
 app.post('/api/auth/logout', (req, res) => res.json({ ok: true }));
 
 app.use('/api/staff', (req, res, next) => {
+  // 서명 키가 갖춰지지 않았으면 토큰을 위조할 수 있으므로 상담원 API 전체를 막는다
+  if (configProblems.length) return res.status(401).json({ error: '상담원 인증이 필요합니다' });
   if (!verifyToken(req.get('x-staff-token'))) return res.status(401).json({ error: '상담원 인증이 필요합니다' });
   next();
 });
@@ -436,7 +449,10 @@ app.use('/api', (req, res) => res.status(404).json({ error: '없는 API입니다
 app.use((err, req, res, next) => {
   console.error(err);
   const status = err.status || 500;
-  res.status(status).json({ error: status === 413 ? '파일이 너무 큽니다' : '서버 오류가 발생했습니다' });
+  const message = status === 413 ? '파일이 너무 큽니다'
+    : status === 503 ? err.message
+      : '서버 오류가 발생했습니다';
+  res.status(status).json({ error: message });
 });
 
 module.exports = app;
