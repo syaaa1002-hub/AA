@@ -1,4 +1,4 @@
-// Express 서버와 API
+// Express 서버와 API. 로컬에서는 `npm start`로 실행하고, Vercel에서는 내보낸 app을 함수로 실행한다.
 require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet: true });
 const path = require('path');
 const fs = require('fs');
@@ -7,26 +7,37 @@ const os = require('os');
 const express = require('express');
 const XLSX = require('xlsx');
 const {
-  db, CODES, isoWeek, isValidWeek, isBlank,
-  getProduct, nextProductId, validateProduct, saveProduct, validateSale, saveSale,
+  sql, CODES, isoWeek, isValidWeek, isBlank,
+  getProduct, allProducts, nextProductId, validateProduct, saveProduct, validateSale, saveSales,
 } = require('./db');
 
 const PORT = Number(process.env.PORT) || 3000;
+const IS_VERCEL = !!process.env.VERCEL;
+
 const STAFF_PIN = String(process.env.STAFF_PIN || '').trim();
-if (!/^\d{4}$/.test(STAFF_PIN)) {
-  console.error('.env 파일의 STAFF_PIN을 숫자 4자리로 설정해 주세요. (.env.example 참고)');
-  process.exit(1);
+if (!/^\d{4,12}$/.test(STAFF_PIN)) {
+  throw new Error('STAFF_PIN을 숫자 4~12자리로 설정해 주세요. 인터넷에 공개할 때는 6자리 이상을 권장합니다.');
 }
 
+// 토큰 서명 키. PIN을 바꾸면 기존 토큰도 함께 무효가 된다.
+let AUTH_SECRET = process.env.AUTH_SECRET;
+if (!AUTH_SECRET) {
+  if (IS_VERCEL) throw new Error('Vercel 환경 변수에 AUTH_SECRET을 설정해 주세요.');
+  AUTH_SECRET = crypto.randomBytes(32).toString('hex');
+  console.warn('AUTH_SECRET이 없어 임시 값을 씁니다. 서버를 다시 시작하면 상담원 모드가 풀립니다.');
+}
+const SIGN_KEY = crypto.createHash('sha256').update(`${AUTH_SECRET}:${STAFF_PIN}`).digest();
+
 const app = express();
+if (IS_VERCEL) app.set('trust proxy', true);
 app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'))); // Vercel에서는 무시되고 public/을 CDN이 제공
 
 // ---------------------------------------------------------------- 추천 목록
 
 // 최근 4주 = 판매 데이터에 있는 가장 최근 주차 4개
-function recentWeeks() {
-  return db.prepare('SELECT DISTINCT week FROM sales ORDER BY week DESC LIMIT 4').pluck().all();
+async function recentWeeks() {
+  return (await sql`SELECT DISTINCT week FROM sales ORDER BY week DESC LIMIT 4`).map((r) => r.week);
 }
 
 function readFilters(q) {
@@ -46,22 +57,21 @@ function matchesFilters(p, f) {
 }
 
 // 필터에 맞는 상품을 판매순으로 정렬해 돌려준다
-function recommend(f, { includeSoldOut }) {
-  const weeks = recentWeeks();
-  const wk = weeks.map(() => '?').join(',') || "''";
+async function recommend(f, { includeSoldOut }) {
+  const weeks = await recentWeeks();
+  const [products, soldRows] = await Promise.all([
+    allProducts(),
+    weeks.length ? sql`
+      SELECT product_id, SUM(quantity)::int AS q FROM sales
+      WHERE week IN ${sql(weeks)}
+        ${f.gender ? sql`AND gender = ${f.gender}` : sql``}
+        ${f.age ? sql`AND age_group = ${f.age}` : sql``}
+        ${f.purpose ? sql`AND purpose = ${f.purpose}` : sql``}
+      GROUP BY product_id` : [],
+  ]);
+  const sold = new Map(soldRows.map((r) => [r.product_id, r.q]));
 
-  const cond = [`week IN (${wk})`];
-  const params = [...weeks];
-  if (f.gender) { cond.push('gender = ?'); params.push(f.gender); }
-  if (f.age) { cond.push('age_group = ?'); params.push(f.age); }
-  if (f.purpose) { cond.push('purpose = ?'); params.push(f.purpose); }
-  const sold = new Map(
-    db.prepare(`SELECT product_id, SUM(quantity) AS q FROM sales WHERE ${cond.join(' AND ')} GROUP BY product_id`)
-      .raw().all(...params),
-  );
-
-  const items = db.prepare('SELECT * FROM products').all()
-    .map((r) => ({ ...r, target_ages: r.target_ages.split(','), purposes: r.purposes.split(',') }))
+  const items = products
     .filter((p) => matchesFilters(p, f) && (includeSoldOut || p.stock > 0))
     .map((p) => ({ ...p, sold: sold.get(p.id) || 0 }));
 
@@ -82,13 +92,13 @@ function publicView(p) {
   return o;
 }
 
-app.get('/api/products', (req, res) => {
-  const { weeks, items } = recommend(readFilters(req.query), { includeSoldOut: false });
+app.get('/api/products', async (req, res) => {
+  const { weeks, items } = await recommend(readFilters(req.query), { includeSoldOut: false });
   res.json({ weeks, items: items.map((p) => ({ ...publicView(p), rank: p.rank })) });
 });
 
-app.get('/api/products/:id', (req, res) => {
-  const p = getProduct(req.params.id);
+app.get('/api/products/:id', async (req, res) => {
+  const p = await getProduct(req.params.id);
   if (!p || p.stock <= 0) return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
   res.json(publicView(p));
 });
@@ -96,141 +106,159 @@ app.get('/api/products/:id', (req, res) => {
 // ---------------------------------------------------------------- PIN 인증
 
 const TOKEN_TTL = 12 * 60 * 60 * 1000;
-const tokens = new Map(); // token -> 만료 시각
-const failures = new Map(); // ip -> { count, until }
+const MAX_FAILS = 5;
+const LOCK_MINUTES = 5;
 
-app.post('/api/auth', (req, res) => {
-  const ip = req.ip;
-  const f = failures.get(ip) || { count: 0, until: 0 };
-  if (f.until > Date.now()) {
-    const sec = Math.ceil((f.until - Date.now()) / 1000);
-    return res.status(429).json({ error: `PIN을 여러 번 틀렸습니다. ${sec}초 뒤에 다시 시도해 주세요` });
+const hmac = (s) => crypto.createHmac('sha256', SIGN_KEY).update(String(s)).digest();
+
+// 토큰 = "만료시각.서명". 서버에 저장하지 않으므로 서버가 여러 대여도 동작한다
+function issueToken() {
+  const exp = Date.now() + TOKEN_TTL;
+  return `${exp}.${hmac(exp).toString('base64url')}`;
+}
+function verifyToken(token) {
+  const [exp, sig] = String(token || '').split('.');
+  if (!exp || !sig || !(Number(exp) > Date.now())) return false;
+  const given = Buffer.from(sig, 'base64url');
+  const expected = hmac(exp);
+  return given.length === expected.length && crypto.timingSafeEqual(given, expected);
+}
+
+// Vercel은 x-real-ip를 실제 접속 IP로 덮어쓰므로 믿을 수 있다. 로컬에서는 소켓 주소를 쓴다
+function clientIp(req) {
+  return (IS_VERCEL && req.get('x-real-ip')) || req.ip || 'unknown';
+}
+
+app.post('/api/auth', async (req, res) => {
+  const ip = clientIp(req);
+  const [lock] = await sql`
+    SELECT EXTRACT(EPOCH FROM (locked_until - now()))::int AS sec
+    FROM login_attempts WHERE ip = ${ip} AND locked_until > now()`;
+  if (lock) {
+    return res.status(429).json({ error: `PIN을 여러 번 틀렸습니다. ${Math.max(lock.sec, 1)}초 뒤에 다시 시도해 주세요` });
   }
+
   const pin = String(req.body?.pin ?? '');
-  const ok = pin.length === STAFF_PIN.length
-    && crypto.timingSafeEqual(Buffer.from(pin), Buffer.from(STAFF_PIN));
+  const ok = crypto.timingSafeEqual(hmac(pin), hmac(STAFF_PIN)); // 길이가 달라도 같은 시간에 비교
   if (!ok) {
-    f.count += 1;
-    if (f.count >= 5) { f.count = 0; f.until = Date.now() + 60 * 1000; }
-    failures.set(ip, f);
+    await sql`
+      INSERT INTO login_attempts (ip, fail_count) VALUES (${ip}, 1)
+      ON CONFLICT (ip) DO UPDATE SET
+        fail_count = CASE WHEN login_attempts.fail_count + 1 >= ${MAX_FAILS} THEN 0 ELSE login_attempts.fail_count + 1 END,
+        locked_until = CASE WHEN login_attempts.fail_count + 1 >= ${MAX_FAILS}
+          THEN now() + make_interval(mins => ${LOCK_MINUTES}) ELSE login_attempts.locked_until END`;
     return res.status(401).json({ error: 'PIN이 맞지 않습니다' });
   }
-  failures.delete(ip);
-  const token = crypto.randomBytes(24).toString('hex');
-  tokens.set(token, Date.now() + TOKEN_TTL);
-  res.json({ token });
+  await sql`DELETE FROM login_attempts WHERE ip = ${ip}`;
+  res.json({ token: issueToken() });
 });
 
-app.post('/api/auth/logout', (req, res) => {
-  tokens.delete(req.get('x-staff-token'));
-  res.json({ ok: true });
-});
+// 토큰을 서버에 저장하지 않으므로 화면에서 토큰을 지우는 것으로 충분하다
+app.post('/api/auth/logout', (req, res) => res.json({ ok: true }));
 
-function requireStaff(req, res, next) {
-  const token = req.get('x-staff-token');
-  const exp = token && tokens.get(token);
-  if (!exp || exp < Date.now()) {
-    if (token) tokens.delete(token);
-    return res.status(401).json({ error: '상담원 인증이 필요합니다' });
-  }
+app.use('/api/staff', (req, res, next) => {
+  if (!verifyToken(req.get('x-staff-token'))) return res.status(401).json({ error: '상담원 인증이 필요합니다' });
   next();
-}
-app.use('/api/staff', requireStaff);
+});
 
 // ---------------------------------------------------------------- 상담원 API
 
-app.get('/api/staff/meta', (req, res) => {
-  const images = fs.readdirSync(path.join(__dirname, 'public', 'images'))
+// public/images 목록. Vercel 함수 안에서는 폴더가 안 보일 수 있어 DB에 쓰인 이미지와 합친다
+let imageFiles = [];
+try {
+  imageFiles = fs.readdirSync(path.join(__dirname, 'public', 'images'))
     .filter((n) => /\.(svg|png|jpe?g|gif|webp)$/i.test(n))
     .map((n) => `images/${n}`);
-  const weeks = db.prepare('SELECT DISTINCT week FROM sales ORDER BY week DESC').pluck().all();
+} catch { /* 폴더 없음 */ }
+
+app.get('/api/staff/meta', async (req, res) => {
+  const [weekRows, imageRows, recent] = await Promise.all([
+    sql`SELECT DISTINCT week FROM sales ORDER BY week DESC`,
+    sql`SELECT DISTINCT image FROM products`,
+    recentWeeks(),
+  ]);
+  const images = [...new Set([...imageFiles, ...imageRows.map((r) => r.image), 'images/default.svg'])].sort();
   const today = new Date();
   res.json({
     codes: CODES,
     images,
-    weeks,
-    recentWeeks: recentWeeks(),
+    weeks: weekRows.map((r) => r.week),
+    recentWeeks: recent,
     currentWeek: isoWeek(today),
     lastWeek: isoWeek(new Date(today.getTime() - 7 * 86400000)),
   });
 });
 
-app.get('/api/staff/products', (req, res) => {
-  const { weeks, items } = recommend(readFilters(req.query), { includeSoldOut: true });
+const emptyStats = () => ({ total: 0, gender: { 남성: 0, 여성: 0 }, purpose: { 본인용: 0, 선물용: 0 } });
+
+app.get('/api/staff/products', async (req, res) => {
+  const { weeks, items } = await recommend(readFilters(req.query), { includeSoldOut: true });
 
   // 성별·용도별 판매 비율 (최근 4주, 상품 전체 조건)
-  const wk = weeks.map(() => '?').join(',') || "''";
   const stats = new Map();
-  for (const [pid, gender, purpose, q] of db.prepare(
-    `SELECT product_id, gender, purpose, SUM(quantity) FROM sales WHERE week IN (${wk})
-     GROUP BY product_id, gender, purpose`,
-  ).raw().all(...weeks)) {
-    if (!stats.has(pid)) stats.set(pid, { total: 0, gender: { 남성: 0, 여성: 0 }, purpose: { 본인용: 0, 선물용: 0 } });
+  const rows = weeks.length ? await sql`
+    SELECT product_id, gender, purpose, SUM(quantity)::int AS q FROM sales
+    WHERE week IN ${sql(weeks)} GROUP BY product_id, gender, purpose` : [];
+  for (const { product_id: pid, gender, purpose, q } of rows) {
+    if (!stats.has(pid)) stats.set(pid, emptyStats());
     const s = stats.get(pid);
     s.total += q; s.gender[gender] += q; s.purpose[purpose] += q;
   }
 
-  res.json({
-    weeks,
-    items: items.map((p) => ({
-      ...p,
-      stats: stats.get(p.id) || { total: 0, gender: { 남성: 0, 여성: 0 }, purpose: { 본인용: 0, 선물용: 0 } },
-    })),
-  });
+  res.json({ weeks, items: items.map((p) => ({ ...p, stats: stats.get(p.id) || emptyStats() })) });
 });
 
 function sendValidation(res, errors) {
   return res.status(400).json({ error: errors.join(' / '), errors });
 }
 
-function createProduct(req, res) {
+async function createProduct(req, res) {
   const { value, errors } = validateProduct({ ...req.body, id: req.params.id ?? req.body.id });
   if (errors.length) return sendValidation(res, errors);
-  if (!value.id) value.id = nextProductId();
-  if (getProduct(value.id)) return sendValidation(res, [`상품ID ${value.id}은(는) 이미 있습니다`]);
-  res.status(201).json(saveProduct(value));
+  if (!value.id) value.id = await nextProductId();
+  if (await getProduct(value.id)) return sendValidation(res, [`상품ID ${value.id}은(는) 이미 있습니다`]);
+  res.status(201).json(await saveProduct(value));
 }
 app.post('/api/staff/products', createProduct);
 app.post('/api/staff/products/:id', createProduct);
 
 // 일부 필드만 보내도 된다 (예: 재고만 수정)
-app.put('/api/staff/products/:id', (req, res) => {
-  const cur = getProduct(req.params.id);
+app.put('/api/staff/products/:id', async (req, res) => {
+  const cur = await getProduct(req.params.id);
   if (!cur) return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
   const { value, errors } = validateProduct({ ...cur, ...req.body, id: cur.id });
   if (errors.length) return sendValidation(res, errors);
-  res.json(saveProduct(value));
+  res.json(await saveProduct(value));
 });
 
-app.delete('/api/staff/products/:id', (req, res) => {
-  const r = db.transaction((id) => {
-    db.prepare('DELETE FROM sales WHERE product_id = ?').run(id);
-    return db.prepare('DELETE FROM products WHERE id = ?').run(id);
-  })(req.params.id);
-  if (!r.changes) return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
+// 판매 데이터는 외래키(ON DELETE CASCADE)로 함께 지워진다
+app.delete('/api/staff/products/:id', async (req, res) => {
+  const r = await sql`DELETE FROM products WHERE id = ${req.params.id}`;
+  if (!r.count) return res.status(404).json({ error: '상품을 찾을 수 없습니다' });
   res.json({ ok: true });
 });
 
-app.get('/api/staff/sales', (req, res) => {
+app.get('/api/staff/sales', async (req, res) => {
   const { product_id, week } = req.query;
   if (!product_id || !isValidWeek(String(week))) return res.status(400).json({ error: '상품과 주차를 지정해 주세요' });
-  res.json(db.prepare('SELECT * FROM sales WHERE product_id = ? AND week = ?').all(product_id, week));
+  res.json(await sql`SELECT * FROM sales WHERE product_id = ${product_id} AND week = ${week}`);
 });
 
 // 조건별 판매 수량 일괄 저장. body: { rows: [{product_id, week, gender, age_group, purpose, quantity}] }
-app.put('/api/staff/sales', (req, res) => {
+app.put('/api/staff/sales', async (req, res) => {
   const rows = Array.isArray(req.body?.rows) ? req.body.rows : null;
   if (!rows) return res.status(400).json({ error: 'rows 배열이 필요합니다' });
+  const ids = new Set((await sql`SELECT id FROM products`).map((r) => r.id));
   const valid = [];
   const errors = [];
   rows.forEach((r, i) => {
     const { value, errors: e } = validateSale(r);
-    if (!e.length && !getProduct(value.product_id)) e.push(`없는 상품ID: ${value.product_id}`);
+    if (!e.length && !ids.has(value.product_id)) e.push(`없는 상품ID: ${value.product_id}`);
     if (e.length) errors.push(`${i + 1}번째 행: ${e.join(', ')}`);
     else valid.push(value);
   });
   if (errors.length) return sendValidation(res, errors);
-  db.transaction(() => valid.forEach(saveSale))();
+  await sql.begin((tx) => saveSales(valid, tx));
   res.json({ saved: valid.length });
 });
 
@@ -247,13 +275,14 @@ const SALES_COLS = [
   ['용도', 'purpose'], ['판매수량', 'quantity'],
 ];
 
-app.get('/api/staff/template.xlsx', (req, res) => {
-  const products = db.prepare('SELECT * FROM products ORDER BY id').all();
+app.get('/api/staff/template.xlsx', async (req, res) => {
+  const products = await allProducts();
   const lastWeek = isoWeek(new Date(Date.now() - 7 * 86400000));
+  const cell = (v) => (Array.isArray(v) ? v.join(',') : (v ?? ''));
 
   const wsP = XLSX.utils.aoa_to_sheet([
     PRODUCT_COLS.map((c) => c[0]),
-    ...products.map((p) => PRODUCT_COLS.map(([, k]) => (p[k] ?? ''))),
+    ...products.map((p) => PRODUCT_COLS.map(([, k]) => cell(p[k]))),
   ]);
   wsP['!cols'] = [8, 26, 10, 10, 10, 20, 26, 9, 22, 16, 36, 7, 40].map((wch) => ({ wch }));
 
@@ -318,8 +347,10 @@ function sameProduct(a, b) {
   return SAME_KEYS.every((k) => String(a[k] ?? '') === String(b[k] ?? ''));
 }
 
+const saleKey = (s) => [s.product_id, s.week, s.gender, s.age_group, s.purpose].join('|');
+
 // 업로드 내용을 분석해 반영할 작업 목록과 요약을 만든다
-function analyzeUpload(buf) {
+async function analyzeUpload(buf) {
   let wb;
   try {
     wb = XLSX.read(buf, { type: 'buffer' });
@@ -331,6 +362,7 @@ function analyzeUpload(buf) {
   if (ps.missing && ss.missing) return { fatal: '"상품" 또는 "주간판매" 시트가 없습니다. 관리 화면에서 내려받은 양식을 사용해 주세요.' };
   if (ps.badHeader || ss.badHeader) return { fatal: ps.badHeader || ss.badHeader };
 
+  const existing = new Map((await allProducts()).map((p) => [p.id, p]));
   const errors = [];
   const productOps = [];
   const summary = { products: { add: 0, update: 0, unchanged: 0 }, sales: { add: 0, update: 0 } };
@@ -339,7 +371,7 @@ function analyzeUpload(buf) {
 
   for (const { excelRow, data } of ps.rows) {
     const id = String(data.id ?? '').trim();
-    const cur = id ? getProduct(id) : null;
+    const cur = id ? existing.get(id) : null;
     const input = { ...data };
     if (cur) {
       if (isBlank(input.image)) input.image = cur.image;
@@ -349,7 +381,7 @@ function analyzeUpload(buf) {
     if (id && seenIds.has(id)) e.push(`상품ID ${id}이(가) 시트에 두 번 있습니다`);
     if (e.length) { errors.push({ sheet: '상품', row: excelRow, message: e.join(', ') }); continue; }
 
-    if (!value.id) { value.id = nextProductId(newIds); }
+    if (!value.id) value.id = await nextProductId(newIds);
     seenIds.add(value.id);
     if (cur) {
       if (sameProduct(cur, value)) summary.products.unchanged += 1;
@@ -362,36 +394,38 @@ function analyzeUpload(buf) {
   }
 
   const saleOps = new Map();
-  const existsSale = db.prepare(`SELECT 1 FROM sales WHERE product_id = @product_id AND week = @week
-    AND gender = @gender AND age_group = @age_group AND purpose = @purpose`);
   for (const { excelRow, data } of ss.rows) {
     const { value, errors: e } = validateSale(data);
-    if (!e.length && !getProduct(value.product_id) && !newIds.includes(value.product_id)) {
+    if (!e.length && !existing.has(value.product_id) && !newIds.includes(value.product_id)) {
       e.push(`없는 상품ID: ${value.product_id}`);
     }
     if (e.length) { errors.push({ sheet: '주간판매', row: excelRow, message: e.join(', ') }); continue; }
-    const key = [value.product_id, value.week, value.gender, value.age_group, value.purpose].join('|');
-    saleOps.set(key, value);
+    saleOps.set(saleKey(value), value);
   }
-  for (const s of saleOps.values()) {
-    if (existsSale.get(s)) summary.sales.update += 1; else summary.sales.add += 1;
+
+  const weeks = [...new Set([...saleOps.values()].map((s) => s.week))];
+  const existingSales = new Set(weeks.length
+    ? (await sql`SELECT product_id, week, gender, age_group, purpose FROM sales WHERE week IN ${sql(weeks)}`).map(saleKey)
+    : []);
+  for (const key of saleOps.keys()) {
+    if (existingSales.has(key)) summary.sales.update += 1; else summary.sales.add += 1;
   }
 
   return { summary, errors, productOps, saleOps: [...saleOps.values()] };
 }
 
 app.post('/api/staff/upload',
-  express.raw({ type: () => true, limit: '10mb' }),
-  (req, res) => {
+  express.raw({ type: () => true, limit: '4mb' }), // Vercel 요청 크기 한도 4.5MB
+  async (req, res) => {
     if (!req.body?.length) return res.status(400).json({ error: '파일이 비어 있습니다' });
-    const r = analyzeUpload(req.body);
+    const r = await analyzeUpload(req.body);
     if (r.fatal) return res.status(400).json({ error: r.fatal });
     const dryRun = req.query.dryRun !== 'false';
     if (!dryRun) {
-      db.transaction(() => {
-        r.productOps.forEach(saveProduct);
-        r.saleOps.forEach(saveSale);
-      })();
+      await sql.begin(async (tx) => {
+        for (const p of r.productOps) await saveProduct(p, tx);
+        await saveSales(r.saleOps, tx);
+      });
     }
     res.json({ applied: !dryRun, summary: r.summary, errors: r.errors });
   });
@@ -401,14 +435,19 @@ app.post('/api/staff/upload',
 app.use('/api', (req, res) => res.status(404).json({ error: '없는 API입니다' }));
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(err.status || 500).json({ error: err.status === 413 ? '파일이 너무 큽니다' : '서버 오류가 발생했습니다' });
+  const status = err.status || 500;
+  res.status(status).json({ error: status === 413 ? '파일이 너무 큽니다' : '서버 오류가 발생했습니다' });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  const ips = Object.values(os.networkInterfaces()).flat()
-    .filter((n) => n && n.family === 'IPv4' && !n.internal).map((n) => n.address);
-  console.log(`맞춤 상품 추천 도구가 실행 중입니다.`);
-  console.log(`  이 PC:      http://localhost:${PORT}`);
-  for (const ip of ips) console.log(`  사내망 PC:  http://${ip}:${PORT}`);
-  console.log(`  관리 화면:  http://localhost:${PORT}/admin.html`);
-});
+module.exports = app;
+
+if (require.main === module) {
+  app.listen(PORT, '0.0.0.0', () => {
+    const ips = Object.values(os.networkInterfaces()).flat()
+      .filter((n) => n && n.family === 'IPv4' && !n.internal).map((n) => n.address);
+    console.log('맞춤 상품 추천 도구가 실행 중입니다.');
+    console.log(`  이 PC:      http://localhost:${PORT}`);
+    for (const ip of ips) console.log(`  사내망 PC:  http://${ip}:${PORT}`);
+    console.log(`  관리 화면:  http://localhost:${PORT}/admin.html`);
+  });
+}

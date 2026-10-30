@@ -1,8 +1,8 @@
 // 샘플 상품 30개, 샘플 이미지, 최근 4주 조건별 판매 데이터를 넣는다.
-// 실행하면 기존 상품·판매 데이터를 모두 지우고 새로 넣는다.
+// 실행하면 테이블을 만들고(supabase/schema.sql), 기존 상품·판매 데이터를 모두 지우고 새로 넣는다.
 const fs = require('fs');
 const path = require('path');
-const { db, CODES, isoWeek, saveProduct, saveSale } = require('./db');
+const { sql, CODES, isoWeek, saveProduct, saveSales } = require('./db');
 
 const IMG_DIR = path.join(__dirname, 'public', 'images');
 fs.mkdirSync(IMG_DIR, { recursive: true });
@@ -111,7 +111,7 @@ function mulberry32(a) {
   };
 }
 
-function seed() {
+async function seed() {
   writeImages();
   const rand = mulberry32(20261030);
 
@@ -119,37 +119,44 @@ function seed() {
   const today = new Date();
   const weeks = [4, 3, 2, 1].map((i) => isoWeek(new Date(today.getTime() - i * 7 * 86400000)));
 
-  const tx = db.transaction(() => {
-    db.exec('DELETE FROM sales; DELETE FROM products;');
-    for (const [id, name, category, price, sale_price, target_gender, target_ages, purposes, recommend_text, stock, memo, , pop] of PRODUCTS) {
-      saveProduct({
-        id, name, category, price, sale_price, image: `images/${id}.svg`, link: '',
-        target_gender, target_ages, purposes, recommend_text, stock, memo,
-      });
-      for (const week of weeks) {
-        for (const gender of CODES.genders) {
-          for (const age_group of ALL_AGES) {
-            for (const purpose of CODES.purposes) {
-              const match = (target_gender === '공용' || target_gender === gender)
-                && target_ages.includes(age_group) && purposes.includes(purpose);
-              let quantity = 0;
-              if (match) {
-                quantity = Math.round(pop * (1 + rand() * 3));
-              } else if (rand() < 0.15) {
-                quantity = Math.floor(rand() * 3); // 대상 밖 소량 구매
-              }
-              if (quantity > 0) saveSale({ product_id: id, week, gender, age_group, purpose, quantity });
+  const sales = [];
+  for (const [id, , , , , target_gender, target_ages, purposes, , , , , pop] of PRODUCTS) {
+    for (const week of weeks) {
+      for (const gender of CODES.genders) {
+        for (const age_group of ALL_AGES) {
+          for (const purpose of CODES.purposes) {
+            const match = (target_gender === '공용' || target_gender === gender)
+              && target_ages.includes(age_group) && purposes.includes(purpose);
+            let quantity = 0;
+            if (match) {
+              quantity = Math.round(pop * (1 + rand() * 3));
+            } else if (rand() < 0.15) {
+              quantity = Math.floor(rand() * 3); // 대상 밖 소량 구매
             }
+            if (quantity > 0) sales.push({ product_id: id, week, gender, age_group, purpose, quantity });
           }
         }
       }
     }
-  });
-  tx();
+  }
 
-  const pc = db.prepare('SELECT COUNT(*) FROM products').pluck().get();
-  const sc = db.prepare('SELECT COUNT(*) FROM sales').pluck().get();
+  await sql.unsafe(fs.readFileSync(path.join(__dirname, 'supabase', 'schema.sql'), 'utf8'));
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM sales`;
+    await tx`DELETE FROM products`;
+    for (const [id, name, category, price, sale_price, target_gender, target_ages, purposes, recommend_text, stock, memo] of PRODUCTS) {
+      await saveProduct({
+        id, name, category, price, sale_price, image: `images/${id}.svg`, link: '',
+        target_gender, target_ages, purposes, recommend_text, stock, memo,
+      }, tx);
+    }
+    await saveSales(sales, tx);
+  });
+
+  const [{ pc, sc }] = await sql`SELECT (SELECT COUNT(*) FROM products)::int AS pc, (SELECT COUNT(*) FROM sales)::int AS sc`;
   console.log(`샘플 상품 ${pc}개, 판매 데이터 ${sc}행 (${weeks[0]} ~ ${weeks[3]}) 을 넣었습니다.`);
 }
 
-seed();
+seed()
+  .catch((e) => { console.error('샘플 데이터를 넣지 못했습니다:', e.message); process.exitCode = 1; })
+  .finally(() => sql.end());

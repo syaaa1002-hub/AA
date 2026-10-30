@@ -52,8 +52,8 @@
   <dialog id="pinDialog" class="dialog">
     <form method="dialog">
       <h2>상담원 모드</h2>
-      <p class="muted">PIN 4자리를 입력하세요.</p>
-      <input type="password" inputmode="numeric" pattern="\d{4}" maxlength="4" autocomplete="off" class="pin-input" aria-label="PIN">
+      <p class="muted">PIN을 입력하세요.</p>
+      <input type="password" inputmode="numeric" pattern="\d{4,12}" maxlength="12" autocomplete="off" class="pin-input" aria-label="PIN">
       <p class="pin-error" role="alert"></p>
       <div class="dialog-actions">
         <button type="button" class="btn btn-ghost" data-cancel>취소</button>

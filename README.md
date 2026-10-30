@@ -1,64 +1,50 @@
 # 맞춤 상품 추천 도구
 
-고객이 성별·연령대·용도를 고르면 최근 4주 판매 데이터 기준으로 잘 팔리는 상품을 보여주는 사내 웹 도구입니다.
+고객이 성별·연령대·용도를 고르면 최근 4주 판매 데이터 기준으로 잘 팔리는 상품을 보여주는 웹 도구입니다.
 상담원은 PIN으로 상담원 모드를 켜서 재고·내부 메모·판매 통계를 보고, 안내 문구를 복사해 고객에게 보낼 수 있습니다.
+
+- 데이터는 **Supabase(PostgreSQL)** 에 저장하고, **Vercel**에 배포합니다. 배포 순서는 [DEPLOY.md](DEPLOY.md)를 보세요.
+- 인터넷 없이 사내망 PC 한 대에서만 쓰는 버전(SQLite)은 `offline` 브랜치에 있습니다.
 
 | 화면 | 주소 | 누가 |
 | --- | --- | --- |
-| 추천 화면 | `http://<서버PC IP>:3000/` | 고객, 상담원(오른쪽 위 "상담원 모드") |
-| 관리 화면 | `http://<서버PC IP>:3000/admin.html` | 상담원, MD (PIN 필요) |
+| 추천 화면 | `/` | 고객, 상담원(오른쪽 위 "상담원 모드") |
+| 관리 화면 | `/admin.html` | 상담원, MD (PIN 필요) |
 | 데모 쇼핑몰 | `/shop.html?id=P001` | 상품 카드 클릭 시 이동 (실제 링크로 바꿀 수 있음) |
 
-## 실행 방법
+## 내 PC에서 실행하기
 
-준비물: Node.js 20 이상 (이 PC에는 Node.js LTS가 설치되어 있습니다)
+준비물: Node.js 20 이상, Supabase 프로젝트 (만드는 법은 DEPLOY.md 4-1)
 
-```bash
-npm install
-```
+1. `.env.example`을 복사해 `.env`를 만들고 `DATABASE_URL`, `STAFF_PIN`, `AUTH_SECRET`을 채웁니다.
+2. 패키지를 설치합니다.
 
-```bash
-npm run seed
-```
-
-```bash
-npm start
-```
-
-- `npm run seed`는 샘플 상품 30개와 최근 4주 판매 데이터를 넣습니다. **기존 데이터를 모두 지우고** 다시 넣으므로 운영 중에는 실행하지 마세요.
-- 서버를 켜면 이 PC 주소와 사내망 접속 주소가 화면에 표시됩니다.
-- 서버를 끄려면 실행 창에서 `Ctrl + C`를 누릅니다.
-
-### 설정 (.env)
-
-`.env.example`을 복사해 `.env`를 만들고 값을 바꿉니다.
-
-```
-PORT=3000
-STAFF_PIN=1234
-```
-
-PIN을 바꾼 뒤에는 서버를 다시 시작해야 합니다. PIN이 숫자 4자리가 아니면 서버가 시작되지 않습니다.
-
-## 사내망의 다른 PC에서 접속하기
-
-1. 서버 PC에서 `npm start` 후 화면에 나온 `사내망 PC: http://192.168.x.x:3000` 주소를 확인합니다. (또는 `ipconfig`의 IPv4 주소)
-2. 서버 PC의 Windows 방화벽에서 3000번 포트를 허용합니다. 관리자 PowerShell에서:
-
-   ```powershell
-   New-NetFirewallRule -DisplayName "상품추천 3000" -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow
+   ```bash
+   npm install
    ```
 
-   처음 실행할 때 Windows가 "액세스 허용" 창을 띄우면 "개인/도메인 네트워크"에 체크하고 허용해도 됩니다.
-3. 다른 PC의 브라우저에서 그 주소로 접속합니다. 한 PC에서 고친 내용은 다른 PC에서 새로고침하면 보입니다.
+3. 테이블을 만들고 샘플 상품 30개와 최근 4주 판매 데이터를 넣습니다. **Supabase의 기존 상품·판매 데이터를 모두 지우므로** 운영 시작 후에는 실행하지 마세요.
 
-## 인터넷이 막힌 PC에 설치하기
+   ```bash
+   npm run seed
+   ```
 
-`npm install`은 처음 한 번 인터넷이 필요합니다. 사내망이 막혀 있으면 인터넷이 되는 PC에서 `npm install`까지 마친 뒤
-`node_modules` 폴더를 포함해 `product-recommender` 폴더째 복사합니다. 두 PC의 Node.js 주 버전(예: 26)과 Windows 64비트 여부가 같아야 합니다
-(`better-sqlite3`가 PC에 맞게 빌드된 파일을 쓰기 때문).
+4. 서버를 켭니다. 화면에 나온 주소(`http://localhost:3000`)로 접속합니다.
 
-화면은 외부 CDN·외부 이미지·외부 글꼴을 쓰지 않으므로 인터넷 없이도 그대로 보입니다.
+   ```bash
+   npm start
+   ```
+
+## 환경 변수
+
+| 이름 | 설명 |
+| --- | --- |
+| `DATABASE_URL` | Supabase **Transaction pooler** 연결 문자열 (포트 6543) |
+| `STAFF_PIN` | 상담원 모드·관리 화면 PIN. 숫자 4~12자리, 인터넷 공개 시 6자리 이상 권장 |
+| `AUTH_SECRET` | 로그인 토큰 서명용 긴 임의 문자열. Vercel에서는 필수 |
+| `PORT` | 로컬 실행 포트 (기본 3000) |
+
+PIN이나 `AUTH_SECRET`을 바꾸면 이미 켜져 있던 상담원 모드가 모두 풀립니다.
 
 ## 사용 방법
 
@@ -69,7 +55,7 @@ PIN을 바꾼 뒤에는 서버를 다시 시작해야 합니다. PIN이 숫자 4
 3. 위에서부터 재고·내부 메모 확인 → **안내 문구 복사** → 메신저·문자에 붙여넣기
    - 복사 형식: `상품명 판매가원 / 추천문구 / 링크`
 4. 품절 상품은 회색과 "품절" 배지로 보입니다(고객 화면에는 나오지 않음).
-5. 상담원 모드는 다시 누르거나 브라우저 탭을 닫으면 꺼집니다.
+5. 상담원 모드는 다시 누르거나 브라우저 탭을 닫으면 꺼집니다. 켠 지 12시간이 지나면 자동으로 풀립니다.
 
 ### MD: 매주 데이터 반영
 
@@ -88,17 +74,18 @@ PIN을 바꾼 뒤에는 서버를 다시 시작해야 합니다. PIN이 숫자 4
 - 정렬: 선택 조건에 맞는 최근 4주(판매 데이터에 있는 가장 최근 주차 4개) 판매 수량 합계가 큰 순 → 할인 상품 우선 → 상품명 순
 - 할인가가 있으면 정가(취소선)·할인가·할인율·"할인" 배지 표시
 - 상담원 전용 정보(재고·메모·판매 통계)는 PIN 인증을 받은 요청에만 서버가 돌려줍니다.
-  PIN은 5번 틀리면 1분간 잠깁니다. 인증은 서버를 다시 시작하면 풀립니다.
+  PIN을 5번 틀리면 그 IP는 5분간 잠깁니다.
 
 ## 파일 구조
 
 ```
-server.js        Express 서버와 API
-db.js            SQLite 연결, 테이블 생성, 입력값 검증
-seed.js          샘플 상품 30개 + 샘플 이미지 + 최근 4주 판매 데이터
-data/app.db      데이터 파일 (백업은 서버를 끈 뒤 이 파일을 복사)
-public/          화면 (index.html 추천, admin.html 관리, shop.html 데모 쇼핑몰)
-public/images/   상품 이미지 (새 이미지는 여기에 넣으면 관리 화면에서 고를 수 있음)
+server.js            Express 서버와 API (Vercel에서는 module.exports = app 으로 실행)
+db.js                Supabase(PostgreSQL) 연결, 입력값 검증, 저장 함수
+seed.js              테이블 생성 + 샘플 상품 30개 + 샘플 이미지 + 최근 4주 판매 데이터
+supabase/schema.sql  테이블 정의 (RLS로 Supabase 공개 API 차단)
+vercel.json          서버 함수 지역: 서울(icn1)
+public/              화면 (index.html 추천, admin.html 관리, shop.html 데모 쇼핑몰)
+public/images/       상품 이미지 (새 이미지는 여기에 넣고 GitHub에 push)
 ```
 
 ## API
@@ -112,4 +99,4 @@ public/images/   상품 이미지 (새 이미지는 여기에 넣으면 관리 �
 | POST / PUT / DELETE | `/api/staff/products/:id` | 상품 추가·수정(일부 필드만 가능)·삭제 | 예 |
 | GET / PUT | `/api/staff/sales` | 상품·주차별 판매 조회 / `{rows:[...]}` 일괄 저장 | 예 |
 | GET | `/api/staff/template.xlsx` | 엑셀 양식 (현재 상품이 채워진 상태) | 예 |
-| POST | `/api/staff/upload?dryRun=true` | 엑셀 미리보기 / `dryRun=false`로 반영 | 예 |
+| POST | `/api/staff/upload?dryRun=true` | 엑셀 미리보기 / `dryRun=false`로 반영 (파일 4MB 이하) | 예 |

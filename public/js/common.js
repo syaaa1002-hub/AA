@@ -115,7 +115,7 @@ function askPin() {
     };
     const onSubmit = async (e) => {
       e.preventDefault();
-      if (!/^\d{4}$/.test(input.value)) { err.textContent = '숫자 4자리를 입력해 주세요'; return; }
+      if (!/^\d{4,12}$/.test(input.value)) { err.textContent = '숫자로 된 PIN을 입력해 주세요'; return; }
       try {
         await login(input.value);
         finish(true);

@@ -118,7 +118,7 @@ body.is-staff .staff-info .btn-primary { background: var(--staff); border-color:
 .dialog::backdrop { background: rgba(15, 23, 42, .45); }
 .dialog h2 { margin: 0 0 4px; font-size: 18px; }
 .dialog p { margin: 0 0 12px; }
-.pin-input { width: 100%; font-size: 28px; letter-spacing: 12px; text-align: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.pin-input { width: 100%; font-size: 28px; letter-spacing: 8px; text-align: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
 .pin-error { color: var(--sale); font-size: 13px; min-height: 20px; margin: 6px 0 0 !important; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 

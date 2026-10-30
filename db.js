@@ -1,41 +1,22 @@
-// SQLite 연결, 테이블 생성, 상품·판매 데이터 공통 검증 함수
-const path = require('path');
-const fs = require('fs');
-const Database = require('better-sqlite3');
+// Supabase(PostgreSQL) 연결, 상품·판매 데이터 공통 검증·저장 함수
+require('dotenv').config({ path: require('path').join(__dirname, '.env'), quiet: true });
+const postgres = require('postgres');
 
-const DATA_DIR = path.join(__dirname, 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  throw new Error('DATABASE_URL이 설정되지 않았습니다. .env(로컬) 또는 Vercel 환경 변수에 Supabase 연결 문자열을 넣어 주세요.');
+}
+const isLocalDb = /@(localhost|127\.0\.0\.1)[:/]/.test(DATABASE_URL);
 
-const db = new Database(path.join(DATA_DIR, 'app.db'));
-
-db.exec(`
-CREATE TABLE IF NOT EXISTS products (
-  id             TEXT PRIMARY KEY,
-  name           TEXT NOT NULL,
-  category       TEXT NOT NULL,
-  price          INTEGER NOT NULL,
-  sale_price     INTEGER,
-  image          TEXT NOT NULL DEFAULT '',
-  link           TEXT NOT NULL DEFAULT '',
-  target_gender  TEXT NOT NULL,
-  target_ages    TEXT NOT NULL,
-  purposes       TEXT NOT NULL,
-  recommend_text TEXT NOT NULL DEFAULT '',
-  stock          INTEGER NOT NULL DEFAULT 0,
-  memo           TEXT NOT NULL DEFAULT '',
-  updated_at     TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sales (
-  product_id TEXT NOT NULL,
-  week       TEXT NOT NULL,
-  gender     TEXT NOT NULL,
-  age_group  TEXT NOT NULL,
-  purpose    TEXT NOT NULL,
-  quantity   INTEGER NOT NULL,
-  PRIMARY KEY (product_id, week, gender, age_group, purpose)
-);
-CREATE INDEX IF NOT EXISTS idx_sales_week ON sales(week);
-`);
+// Supabase 트랜잭션 풀러(6543)는 prepared statement를 지원하지 않으므로 prepare: false
+const sql = postgres(DATABASE_URL, {
+  prepare: false,
+  ssl: isLocalDb ? false : 'require',
+  max: process.env.VERCEL ? 3 : 10,
+  idle_timeout: 20,
+  connect_timeout: 15,
+  onnotice: () => {},
+});
 
 const CODES = {
   genders: ['남성', '여성'],
@@ -75,12 +56,6 @@ function isBlank(v) {
   return v === null || v === undefined || String(v).trim() === '';
 }
 
-function nowStr() {
-  const d = new Date();
-  const p = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
 // ISO 주차 문자열 (예: 2026-W44)
 function isoWeek(date) {
   const t = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -107,13 +82,19 @@ function rowToProduct(r) {
   };
 }
 
-function getProduct(id) {
-  return rowToProduct(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
+// tx 인자에는 sql 또는 sql.begin()의 트랜잭션을 넘긴다
+async function getProduct(id, tx = sql) {
+  const [r] = await tx`SELECT * FROM products WHERE id = ${id}`;
+  return rowToProduct(r);
 }
 
-function nextProductId(extraIds = []) {
+async function allProducts(tx = sql) {
+  return (await tx`SELECT * FROM products ORDER BY id`).map(rowToProduct);
+}
+
+async function nextProductId(extraIds = [], tx = sql) {
   let max = 0;
-  const ids = db.prepare('SELECT id FROM products').pluck().all().concat(extraIds);
+  const ids = (await tx`SELECT id FROM products`).map((r) => r.id).concat(extraIds);
   for (const id of ids) {
     const m = /^P(\d+)$/.exec(id);
     if (m) max = Math.max(max, +m[1]);
@@ -176,29 +157,29 @@ function validateProduct(input) {
   return { value: v, errors };
 }
 
-const upsertStmt = db.prepare(`
-INSERT INTO products (id, name, category, price, sale_price, image, link, target_gender,
-  target_ages, purposes, recommend_text, stock, memo, updated_at)
-VALUES (@id, @name, @category, @price, @sale_price, @image, @link, @target_gender,
-  @target_ages, @purposes, @recommend_text, @stock, @memo, @updated_at)
-ON CONFLICT(id) DO UPDATE SET
-  name = excluded.name, category = excluded.category, price = excluded.price,
-  sale_price = excluded.sale_price, image = excluded.image, link = excluded.link,
-  target_gender = excluded.target_gender, target_ages = excluded.target_ages,
-  purposes = excluded.purposes, recommend_text = excluded.recommend_text,
-  stock = excluded.stock, memo = excluded.memo, updated_at = excluded.updated_at
-`);
+const PRODUCT_COLUMNS = ['id', 'name', 'category', 'price', 'sale_price', 'image', 'link',
+  'target_gender', 'target_ages', 'purposes', 'recommend_text', 'stock', 'memo'];
 
-function saveProduct(p) {
-  const link = p.link || `/shop.html?id=${encodeURIComponent(p.id)}`;
-  upsertStmt.run({
+function productRow(p) {
+  return {
     ...p,
-    link,
+    link: p.link || `/shop.html?id=${encodeURIComponent(p.id)}`,
     target_ages: p.target_ages.join(','),
     purposes: p.purposes.join(','),
-    updated_at: nowStr(),
-  });
-  return getProduct(p.id);
+  };
+}
+
+async function saveProduct(p, tx = sql) {
+  const [r] = await tx`
+    INSERT INTO products ${tx(productRow(p), PRODUCT_COLUMNS)}
+    ON CONFLICT (id) DO UPDATE SET
+      name = excluded.name, category = excluded.category, price = excluded.price,
+      sale_price = excluded.sale_price, image = excluded.image, link = excluded.link,
+      target_gender = excluded.target_gender, target_ages = excluded.target_ages,
+      purposes = excluded.purposes, recommend_text = excluded.recommend_text,
+      stock = excluded.stock, memo = excluded.memo, updated_at = now()
+    RETURNING *`;
+  return rowToProduct(r);
 }
 
 // 판매 행 검증. { value, errors }
@@ -221,24 +202,26 @@ function validateSale(input) {
   return { value: v, errors };
 }
 
-const saleUpsertStmt = db.prepare(`
-INSERT INTO sales (product_id, week, gender, age_group, purpose, quantity)
-VALUES (@product_id, @week, @gender, @age_group, @purpose, @quantity)
-ON CONFLICT(product_id, week, gender, age_group, purpose) DO UPDATE SET quantity = excluded.quantity
-`);
-const saleDeleteStmt = db.prepare(`
-DELETE FROM sales WHERE product_id = @product_id AND week = @week AND gender = @gender
-  AND age_group = @age_group AND purpose = @purpose
-`);
+const SALE_COLUMNS = ['product_id', 'week', 'gender', 'age_group', 'purpose', 'quantity'];
 
-// 수량 0은 행을 지워 테이블을 깔끔하게 유지한다
-function saveSale(s) {
-  if (s.quantity === 0) saleDeleteStmt.run(s);
-  else saleUpsertStmt.run(s);
+// 여러 판매 행을 한 번에 저장한다. 수량 0은 행을 지워 테이블을 깔끔하게 유지한다
+async function saveSales(rows, tx = sql) {
+  const upserts = rows.filter((s) => s.quantity > 0);
+  const deletes = rows.filter((s) => s.quantity === 0);
+  for (let i = 0; i < upserts.length; i += 500) {
+    await tx`
+      INSERT INTO sales ${tx(upserts.slice(i, i + 500), SALE_COLUMNS)}
+      ON CONFLICT (product_id, week, gender, age_group, purpose) DO UPDATE SET quantity = excluded.quantity`;
+  }
+  for (const s of deletes) {
+    await tx`
+      DELETE FROM sales WHERE product_id = ${s.product_id} AND week = ${s.week} AND gender = ${s.gender}
+        AND age_group = ${s.age_group} AND purpose = ${s.purpose}`;
+  }
 }
 
 module.exports = {
-  db, CODES, DEFAULT_IMAGE,
-  isoWeek, isValidWeek, nowStr, toInt, isBlank,
-  getProduct, nextProductId, validateProduct, saveProduct, validateSale, saveSale,
+  sql, CODES, DEFAULT_IMAGE,
+  isoWeek, isValidWeek, toInt, isBlank,
+  getProduct, allProducts, nextProductId, validateProduct, saveProduct, validateSale, saveSales,
 };
