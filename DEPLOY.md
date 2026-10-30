@@ -71,6 +71,11 @@
 
 ### 3-4. Vercel에 배포하기 (약 5분)
 
+> **현재 상태 (2026-10-30):** Vercel 프로젝트 `product-recommender`(팀 `sy-aa66`)를 만들고 배포까지 마쳤습니다.
+> 주소는 https://product-recommender-khaki.vercel.app 입니다. 아래 1~3단계는 끝났고, **4단계(환경 변수)와 Redeploy만 남았습니다.**
+> 환경 변수를 넣기 전에는 화면은 뜨지만 상품 목록이 비어 있고 API가 500 오류를 냅니다.
+> 환경 변수 위치: Vercel → product-recommender → **Settings → Environment Variables**
+
 1. https://vercel.com 에서 **GitHub 계정(syaaa1002-hub)** 으로 가입합니다. Hobby(무료) 플랜이면 됩니다.
 2. **Add New → Project** → GitHub 저장소 `syaaa1002-hub/AA`를 **Import** 합니다. (저장소가 안 보이면 GitHub 앱 권한에서 이 저장소를 허용)
 3. Framework Preset이 **Express**(또는 Other)로 잡히면 Build Command·Output Directory는 비워 둡니다.
